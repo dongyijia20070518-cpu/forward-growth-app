@@ -69,7 +69,7 @@ export async function POST(request: NextRequest) {
           .bind(captureId, user.userId, body, result.category, result.topic, result.confidence, now).run();
         if (result.category === "Task") {
           await db.prepare("INSERT INTO tasks (id,user_id,title,notes,tier,status,due_date,carry_count,progress_text,project_id,created_at,completed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
-            .bind(id("task"), user.userId, body, "由快速记录自动识别", "suggested", "open", dueDateFrom(body, localDate), 0, "", null, now, null).run();
+            .bind(id("task"), user.userId, body, `由记录 ${captureId} 创建`, "suggested", "open", dueDateFrom(body, localDate), 0, "", null, now, null).run();
         }
         const firstCapture = !Boolean(account.first_capture_completed);
         if (firstCapture) await db.prepare("UPDATE profiles SET first_capture_completed = 1,updated_at = ? WHERE user_id = ?").bind(now, user.userId).run();
@@ -78,6 +78,17 @@ export async function POST(request: NextRequest) {
         const captureId = clean(payload.id, 100);
         const category = clean(payload.category, 40);
         if (!CATEGORIES.includes(category as never) && category !== "Knowledge") return NextResponse.json({ error: "这个分类暂不支持。" }, { status: 400 });
+        const capture = await db.prepare("SELECT id,body,category,created_at FROM captures WHERE id = ? AND user_id = ? LIMIT 1").bind(captureId, user.userId).first<Record<string, unknown>>();
+        if (!capture) return NextResponse.json({ error: "没有找到这条记录。" }, { status: 404 });
+        const taskNote = `由记录 ${captureId} 创建`;
+        const generatedTask = await db.prepare("SELECT id,status FROM tasks WHERE user_id = ? AND (notes = ? OR (title = ? AND created_at = ? AND notes = '由快速记录自动识别')) LIMIT 1")
+          .bind(user.userId, taskNote, String(capture.body), String(capture.created_at)).first<{ id: string; status: string }>();
+        if (category === "Task" && !generatedTask) {
+          await db.prepare("INSERT INTO tasks (id,user_id,title,notes,tier,status,due_date,carry_count,progress_text,project_id,created_at,completed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
+            .bind(id("task"), user.userId, String(capture.body), taskNote, "suggested", "open", dueDateFrom(String(capture.body), localDate), 0, "", null, String(capture.created_at), null).run();
+        } else if (category !== "Task" && generatedTask?.status === "open") {
+          await db.prepare("DELETE FROM tasks WHERE id = ? AND user_id = ?").bind(generatedTask.id, user.userId).run();
+        }
         await db.prepare("UPDATE captures SET category = ?,confidence = 100 WHERE id = ? AND user_id = ?").bind(category, captureId, user.userId).run();
       } else if (action === "updateTask") {
         const taskId = clean(payload.id, 100);
@@ -92,6 +103,25 @@ export async function POST(request: NextRequest) {
             db.prepare("INSERT INTO progress_events (id,user_id,project_id,body,created_at) VALUES (?,?,?,?,?)").bind(id("event"), user.userId, String(item.project_id), `完成任务：${String(item.title)}`, now),
             db.prepare("UPDATE projects SET updated_at = ? WHERE id = ? AND user_id = ?").bind(now, String(item.project_id), user.userId),
           ]);
+        }
+      } else if (action === "createTask") {
+        const title = clean(payload.title, 300);
+        const projectId = clean(payload.projectId, 100);
+        const dueDate = safeDate(payload.dueDate || localDate);
+        if (!title) return NextResponse.json({ error: "先写清楚这一步要做什么。" }, { status: 400 });
+        if (projectId) {
+          const owned = await db.prepare("SELECT id FROM projects WHERE id = ? AND user_id = ? LIMIT 1").bind(projectId, user.userId).first();
+          if (!owned) return NextResponse.json({ error: "没有找到这个项目。" }, { status: 404 });
+        }
+        const existing = await db.prepare("SELECT id FROM tasks WHERE user_id = ? AND title = ? AND due_date = ? AND status = 'open' AND COALESCE(project_id,'') = ? LIMIT 1")
+          .bind(user.userId, title, dueDate, projectId).first<{ id: string }>();
+        if (existing) {
+          meta = { taskId: existing.id, existed: true };
+        } else {
+          const taskId = id("task");
+          await db.prepare("INSERT INTO tasks (id,user_id,title,notes,tier,status,due_date,carry_count,progress_text,project_id,created_at,completed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
+            .bind(taskId, user.userId, title, "从 Project 的 Plan 创建", "suggested", "open", dueDate, 0, "", projectId || null, now, null).run();
+          meta = { taskId, existed: false };
         }
       } else if (action === "addProgress") {
         const projectId = clean(payload.projectId, 100);

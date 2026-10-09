@@ -44,9 +44,10 @@
 
 ## 4. 信息架构
 
-### Today
+### Today · 每日 Todo List
 
 - 首页大字入口“想要记点什么？”
+- Today 不是记录分类，而是所有日期为今天的 Task 的执行视图
 - 自动生成今日建议，分为“必须做 / 建议做 / 有空可以做”
 - 任务支持完成、恢复、文字进度与项目关联
 - 到期未完成任务自动顺延到今天，并累加顺延次数
@@ -57,11 +58,14 @@
 - 保留用户原话；AI 只生成分类、主题与摘要，不覆盖原文
 - V1.1 分类：Task、Idea、Explore、Moment、Knowledge Candidate；确认沉淀后可成为 Knowledge
 - 用户可确认或修正分类
+- Project 与 Plan 不进入快速记录分类：Project 是已承诺的多步成果，Plan 是 Project 内部的行动路线
+- 手动改为 Task 时同步创建待办；从 Task 改为其他类别时移除尚未完成的自动待办
 - 同一主题第三次出现时提醒建立 Explore 或 Project，不自动替用户决定
 - Knowledge 建议来自真实记录和复盘，确认后沉淀
 
 ### Projects
 
+- 层级固定为 Project（成果）→ Plan（路线）→ Task（具体行动）→ Today（今天执行的 Task）
 - 状态：Focus、Active、Paused、Completed、Archived
 - Focus 同时建议不超过 3–5 个
 - 字段：名称、为什么开始、当前状态、下一步、最近更新时间

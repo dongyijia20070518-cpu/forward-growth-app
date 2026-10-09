@@ -28,11 +28,6 @@ const ruleSets: Array<{ category: Exclude<CaptureCategory, "暂未分类">; patt
     confidence: 96,
   },
   {
-    category: "Explore",
-    pattern: /想(?:系统)?(?:了解|研究|学习|弄懂|搞懂|看看)|研究一下|了解一下|想看看|探索|好奇|不懂.*想/iu,
-    confidence: 94,
-  },
-  {
     category: "Task",
     pattern: /截止|明天|后天|下周|周[一二三四五六日天]|星期[一二三四五六日天]|提交|完成|记得|待办|必须|要做|交作业|安排一下|需要.{0,8}(?:做|交|完成)/iu,
     confidence: 95,
@@ -41,6 +36,11 @@ const ruleSets: Array<{ category: Exclude<CaptureCategory, "暂未分类">; patt
     category: "Moment",
     pattern: /今天.{0,12}(?:感觉|觉得|发生)|今天感觉|今天发生|刚刚发生|发生了|我觉得|我感到|心情|开心|难过|焦虑|失落|兴奋/iu,
     confidence: 93,
+  },
+  {
+    category: "Explore",
+    pattern: /想(?:系统)?(?:了解|研究|学习|弄懂|搞懂|看看)|研究一下|了解一下|想看看|探索|好奇|不懂.*想/iu,
+    confidence: 94,
   },
   {
     category: "Idea",
@@ -111,7 +111,7 @@ async function classifyWithAI(body: string): Promise<Classification | null> {
       body: JSON.stringify({
         model: runtime.OPENAI_CLASSIFIER_MODEL || "gpt-4o-mini",
         store: false,
-        instructions: "Classify one personal growth note. Use Task for an actionable commitment; Idea for a possible concept; Explore for a learning question or interest; Moment for an experience or feeling; Knowledge Candidate for something learned or understood. Return only the requested structured result.",
+        instructions: "Classify one personal growth note by what it is right now. Use Task only for one concrete, completable action; Idea for a possible concept or an uncommitted multi-step outcome; Explore for a learning or research question without a committed deliverable; Moment for an experience or feeling; Knowledge Candidate for something already learned, understood, or summarized. Project and Plan are hierarchy levels, never capture categories, so never return them. Return only the requested structured result.",
         input: body,
         text: {
           format: {
