@@ -15,6 +15,13 @@
       "when": 1791450838707,
       "tag": "0001_public_revanche",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1791558156756,
+      "tag": "0002_low_bloodstorm",
+      "breakpoints": true
     }
   ]
 }
