@@ -22,6 +22,13 @@
       "when": 1791558156756,
       "tag": "0002_low_bloodstorm",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1791609056935,
+      "tag": "0003_perpetual_hawkeye",
+      "breakpoints": true
     }
   ]
 }

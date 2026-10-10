@@ -7,7 +7,7 @@ export type Profile = {
 };
 export type Project = { id: string; title: string; why: string; currentState: string; nextStep: string; status: string; accent: string; updatedAt: string };
 export type Task = { id: string; title: string; notes: string; tier: string; status: string; dueDate: string; carryCount: number; progressText: string; projectId: string | null; createdAt: string; completedAt: string | null };
-export type Capture = { id: string; body: string; category: string; topic: string | null; confidence: number; createdAt: string };
+export type Capture = { id: string; body: string; category: string; secondaryType: string | null; topic: string | null; confidence: number; reason: string; createdAt: string };
 export type ProgressEvent = { id: string; projectId: string; body: string; createdAt: string };
 export type Skill = { id: string; name: string; level: string; evidence: string; updatedAt: string };
 export type Review = { id: string; periodKind: string; periodLabel: string; reflection: string; createdAt: string };
@@ -43,9 +43,20 @@ const project = (row: Record<string, unknown>): Project => ({
 const task = (row: Record<string, unknown>): Task => ({
   id: String(row.id), title: String(row.title), notes: String(row.notes ?? ""), tier: String(row.tier), status: String(row.status), dueDate: String(row.due_date), carryCount: Number(row.carry_count ?? 0), progressText: String(row.progress_text ?? ""), projectId: row.project_id ? String(row.project_id) : null, createdAt: String(row.created_at), completedAt: row.completed_at ? String(row.completed_at) : null,
 });
-const capture = (row: Record<string, unknown>): Capture => ({
-  id: String(row.id), body: String(row.body), category: String(row.category), topic: row.topic ? String(row.topic) : null, confidence: Number(row.confidence ?? 0), createdAt: String(row.created_at),
-});
+const capture = (row: Record<string, unknown>): Capture => {
+  const rawCategory = String(row.category ?? "");
+  const rawConfidence = Number(row.confidence ?? 0);
+  return {
+    id: String(row.id),
+    body: String(row.body),
+    category: rawCategory === "Knowledge Candidate" ? "Knowledge" : rawCategory === "暂未分类" ? "" : rawCategory,
+    secondaryType: row.secondary_type ? String(row.secondary_type) : null,
+    topic: row.topic ? String(row.topic) : null,
+    confidence: rawConfidence > 1 ? rawConfidence / 100 : rawConfidence,
+    reason: String(row.reason ?? ""),
+    createdAt: String(row.created_at),
+  };
+};
 const event = (row: Record<string, unknown>): ProgressEvent => ({ id: String(row.id), projectId: String(row.project_id), body: String(row.body), createdAt: String(row.created_at) });
 const skill = (row: Record<string, unknown>): Skill => ({ id: String(row.id), name: String(row.name), level: String(row.level), evidence: String(row.evidence ?? ""), updatedAt: String(row.updated_at) });
 const review = (row: Record<string, unknown>): Review => ({ id: String(row.id), periodKind: String(row.period_kind), periodLabel: String(row.period_label), reflection: String(row.reflection ?? ""), createdAt: String(row.created_at) });

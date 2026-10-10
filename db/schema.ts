@@ -46,12 +46,29 @@ export const captures = sqliteTable("captures", {
   userId: text("user_id").notNull().default(""),
   body: text("body").notNull(),
   category: text("category").notNull(),
+  secondaryType: text("secondary_type"),
   topic: text("topic"),
   confidence: integer("confidence").notNull().default(78),
+  reason: text("reason").notNull().default(""),
   createdAt: text("created_at").notNull(),
 }, (table) => [
   index("idx_captures_user_topic").on(table.userId, table.topic),
   index("idx_captures_user_created").on(table.userId, table.createdAt),
+]);
+
+export const classificationCorrections = sqliteTable("classification_corrections", {
+  id: text("id").primaryKey(),
+  userId: text("user_id").notNull(),
+  captureId: text("capture_id").notNull(),
+  body: text("body").notNull(),
+  fromType: text("from_type"),
+  toType: text("to_type").notNull(),
+  signalKey: text("signal_key"),
+  topic: text("topic"),
+  createdAt: text("created_at").notNull(),
+}, (table) => [
+  index("idx_corrections_user_signal").on(table.userId, table.signalKey, table.createdAt),
+  index("idx_corrections_user_topic").on(table.userId, table.topic, table.createdAt),
 ]);
 
 export const progressEvents = sqliteTable("progress_events", {

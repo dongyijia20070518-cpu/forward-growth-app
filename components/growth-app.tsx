@@ -15,7 +15,7 @@ import type { AppState, Capture, Project, Task } from "@/lib/data";
 
 type View = "today" | "capture" | "projects" | "review";
 type QueuedAction = { action: string; payload: Record<string, unknown> };
-type RepeatNotice = { topic: string; count: number; captureId?: string };
+type RepeatNotice = { topic: string; count: number; captureId?: string; suggestion: "Explore" | "Project" };
 type Account = { userId: string; email: string };
 
 const emptyState: AppState = { profile: null, projects: [], tasks: [], captures: [], progressEvents: [], skills: [], reviews: [], localDate: "", syncedAt: "" };
@@ -26,17 +26,20 @@ const nav = [
   { id: "review" as View, label: "复盘", icon: BookOpen },
 ];
 const tierLabels: Record<string, string> = { must: "必须做", suggested: "建议做", optional: "有空可以做" };
-const categoryColors: Record<string, string> = { Task: "yellow", Idea: "pink", Explore: "blue", Moment: "pink", "Knowledge Candidate": "blue", Knowledge: "blue", 暂未分类: "neutral" };
+const categoryColors: Record<string, string> = { Task: "yellow", Idea: "pink", Explore: "blue", Moment: "pink", Knowledge: "blue" };
 const categoryOptions = [
   { value: "Task", label: "Task · 具体任务", description: "有清楚的完成动作，可以勾选" },
   { value: "Idea", label: "Idea · 一个想法", description: "觉得可能不错，但还没决定要做" },
   { value: "Explore", label: "Explore · 想继续了解", description: "想研究、学习或弄懂一个问题" },
   { value: "Moment", label: "Moment · 经历或感受", description: "今天发生的事，或当下的感受" },
-  { value: "Knowledge Candidate", label: "Knowledge · 刚学会的", description: "已经理解或总结出的东西" },
-  { value: "Knowledge", label: "Knowledge · 已确认", description: "已经确认值得长期保留的知识" },
-  { value: "暂未分类", label: "暂未分类", description: "信息还不够明确，先保留原话" },
+  { value: "Knowledge", label: "Knowledge · 已形成认知", description: "已经理解、学会或总结出的结论" },
 ];
 const categoryName = (value: string) => categoryOptions.find((item) => item.value === value)?.label ?? value;
+const confidenceHint = (capture: Capture) => {
+  if (!capture.category || capture.confidence < 0.55) return "不太确定，请选择类型";
+  if (capture.confidence < 0.8) return `已识别为 ${capture.category}，可修改`;
+  return capture.secondaryType ? `主类型 ${capture.category} · 次类型 ${capture.secondaryType}` : "已自动分类 · 可随时修改";
+};
 
 function localDateKey(date = new Date()) {
   const year = date.getFullYear();
@@ -169,12 +172,14 @@ export function GrowthApp({ account, signOutPath }: { account: Account; signOutP
 
   const submitCapture = async () => {
     const body = captureText.trim(); if (!body) return; setCaptureText("");
-    const optimistic: Capture = { id: `local-${Date.now()}`, body, category: "正在判断", topic: null, confidence: 0, createdAt: new Date().toISOString() };
+    const optimistic: Capture = { id: `local-${Date.now()}`, body, category: "", secondaryType: null, topic: null, confidence: 0, reason: "正在判断主意图", createdAt: new Date().toISOString() };
     const meta = await runAction({ action: "capture", payload: { body } }, () => setState((current) => ({ ...current, captures: [optimistic, ...current.captures] })));
-    const classification = meta.classification as { category?: string; topic?: string } | undefined;
-    if (meta.repeated && classification?.topic) setRepeatNotice({ topic: classification.topic, count: Number(meta.mentionCount ?? 3), captureId: String(meta.captureId ?? "") });
+    const classification = meta.classification as { primary_type?: string | null; secondary_type?: string; topic?: string; confidence?: number; reason?: string } | undefined;
+    if (meta.repeated && classification?.topic) setRepeatNotice({ topic: classification.topic, count: Number(meta.mentionCount ?? 3), captureId: String(meta.captureId ?? ""), suggestion: meta.repeatSuggestion === "Project" ? "Project" : "Explore" });
     if (meta.firstCapture) toast.success("以后你只需要写，整理交给我。");
-    else if (classification?.category) toast.success(`已记录 · ${categoryName(classification.category)}`);
+    if (!classification?.primary_type || Number(classification.confidence ?? 0) < 0.55) toast.info("我不太确定这条记录的类型，请选择一下。");
+    else if (Number(classification.confidence ?? 0) < 0.8) toast.info(`已识别为 ${categoryName(classification.primary_type)}，可修改`);
+    else toast.success(`已记录 · ${categoryName(classification.primary_type)}`);
   };
   const toggleTask = (task: Task, checked: boolean) => runAction({ action: "updateTask", payload: { id: task.id, status: checked ? "done" : "open", progressText: task.progressText } }, () => setState((current) => ({ ...current, tasks: current.tasks.map((item) => item.id === task.id ? { ...item, status: checked ? "done" : "open" } : item) })));
   const openTask = (task: Task) => { setTaskSheet(task); setTaskProgress(task.progressText); };
@@ -248,7 +253,7 @@ function TodayView({ state, clock, localDate, tasks, captures, completed, captur
   const needsRethink = tasks.filter((task) => task.status === "open" && task.carryCount >= 3);
   return <div className="today-layout"><section className="today-main"><div className="eyebrow">{dateLabel(clock)}</div><h1>想要记点什么？</h1><CaptureComposer value={captureText} setValue={setCaptureText} submit={submitCapture}/>
     {!state.captures.length && <div className="first-memory"><span>✦</span><p>请记下第一个属于你的记忆吧。</p></div>}
-    {repeatNotice && <div className="repeat-notice"><Sparkles/><div><strong>这是你第 {repeatNotice.count} 次提到「{repeatNotice.topic}」</strong><p>反复出现不等于必须做。你可以继续把它当想法、进一步探索，或决定把它做成一个结果。</p><div><button onClick={() => classifyRepeatedTopic("Idea")}>继续作为 Idea</button><button onClick={() => classifyRepeatedTopic("Explore")}>转为 Explore</button><button onClick={() => createProject(repeatNotice.topic)}>创建 Project</button><button className="quiet" onClick={dismissRepeat}>稍后再说</button></div></div></div>}
+    {repeatNotice && <div className="repeat-notice"><Sparkles/><div><strong>这是你第 {repeatNotice.count} 次提到「{repeatNotice.topic}」</strong><p>{repeatNotice.suggestion === "Project" ? "这个主题里已经出现过明确行动，建议把它整理成长期 Project。" : "这个主题反复出现了，建议先转为 Explore；如果已经决定做出成果，也可以建立 Project。"}</p><div><button onClick={() => classifyRepeatedTopic("Idea")}>继续作为 Idea</button><button onClick={() => classifyRepeatedTopic("Explore")}>转为 Explore</button><button onClick={() => createProject(repeatNotice.topic)}>创建 Project</button><button className="quiet" onClick={dismissRepeat}>稍后再说</button></div></div></div>}
     {needsRethink.length > 0 && <div className="rethink-alert"><Clock3/><div><strong>{needsRethink.length} 项任务已顺延至少 3 次</strong><p>不一定要继续背着它们。点开任务，重新判断：缩小、延期，或放下。</p></div></div>}
     <div className="section-heading"><div><span>TODAY · 每日 TODO LIST</span><h2>今天要执行的 Task</h2><p>Today 不是一种分类，它只是把安排在今天的 Task 放在一起。</p></div><span className="completion-pill">{completed}/{tasks.length} 完成</span></div>
     {!tasks.length && <div className="empty-card"><strong>今天还没有 Task</strong><p>写下一个有明确完成动作的待办，按 Enter 保存后就会出现在这里。</p></div>}
@@ -265,7 +270,7 @@ function TaskGroup({ tier, tasks, toggle, open }: { tier: string; tasks: Task[];
 }
 
 function CaptureView({ state, captureText, setCaptureText, submitCapture, updateCategory }: { state: AppState; captureText: string; setCaptureText: (value: string) => void; submitCapture: () => void; updateCategory: (capture: Capture, category: string) => void }) {
-  return <section className="single-page"><div className="page-intro"><span className="eyebrow">CAPTURE · 原话收集箱</span><h1>先记下来，再判断它是什么。</h1><p>这里判断的是一条记录现在的性质，不是在选择它属于哪个 Project。系统只会给建议，你可以随时修改。</p></div><CaptureComposer value={captureText} setValue={setCaptureText} submit={submitCapture}/><ClassificationGuide/>{!state.captures.length && <div className="empty-card capture-empty"><strong>请记下第一个属于你的记忆吧。</strong><p>任务、想法、探索、经历或学到的东西，都可以直接写。</p></div>}<div className="capture-grid">{state.captures.map((item) => <article className="capture-card" key={item.id}><div className="capture-meta"><select className={`category ${categoryColors[item.category] || "neutral"}`} value={item.category === "正在判断" ? "暂未分类" : item.category} onChange={(event) => updateCategory(item, event.target.value)} aria-label="修改分类">{categoryOptions.map((category) => <option key={category.value} value={category.value}>{category.label}</option>)}</select>{item.topic && <span>#{item.topic}</span>}<span>{item.category === "正在判断" ? "正在判断" : item.category === "暂未分类" ? "需要你选择" : "可随时修改"}</span></div><p>{item.body}</p><time>{shortDate(item.createdAt)} · {shortTime(item.createdAt)}</time></article>)}</div></section>;
+  return <section className="single-page"><div className="page-intro"><span className="eyebrow">CAPTURE · 原话收集箱</span><h1>先记下来，再判断它是什么。</h1><p>这里判断的是一条记录现在的性质，不是在选择它属于哪个 Project。系统只会给建议，你可以随时修改。</p></div><CaptureComposer value={captureText} setValue={setCaptureText} submit={submitCapture}/><ClassificationGuide/>{!state.captures.length && <div className="empty-card capture-empty"><strong>请记下第一个属于你的记忆吧。</strong><p>任务、想法、探索、经历或学到的东西，都可以直接写。</p></div>}<div className="capture-grid">{state.captures.map((item) => <article className="capture-card" key={item.id}><div className="capture-meta"><select className={`category ${categoryColors[item.category] || "neutral"}`} value={item.category} onChange={(event) => updateCategory(item, event.target.value)} aria-label="修改分类"><option value="" disabled>选择类型</option>{categoryOptions.map((category) => <option key={category.value} value={category.value}>{category.label}</option>)}</select>{item.topic && <span>#{item.topic}</span>}<span>{confidenceHint(item)}</span></div><p>{item.body}</p>{item.reason && <small className="classification-reason">{item.reason}</small>}<time>{shortDate(item.createdAt)} · {shortTime(item.createdAt)}</time></article>)}</div></section>;
 }
 
 function ClassificationGuide() {
@@ -291,7 +296,7 @@ function ReviewPeriod({ kind, state, clock, save }: { kind: string; state: AppSt
   const tasks = state.tasks.filter((task) => inPeriod(task.completedAt, kind, clock));
   const captures = state.captures.filter((item) => inPeriod(item.createdAt, kind, clock));
   const events = state.progressEvents.filter((item) => inPeriod(item.createdAt, kind, clock));
-  const knowledge = captures.filter((item) => item.category === "Knowledge" || item.category === "Knowledge Candidate");
+  const knowledge = captures.filter((item) => item.category === "Knowledge");
   const advanced = new Set(events.map((item) => item.projectId));
   const names: Record<string, string> = { daily: "今天", weekly: "这一周", monthly: "这个月", yearly: "这一年" };
   const repeated = useMemo(() => { const counts = new Map<string, number>(); captures.forEach((item) => item.topic && counts.set(item.topic, (counts.get(item.topic) || 0) + 1)); return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]; }, [captures]);

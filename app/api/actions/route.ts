@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getChatGPTUser } from "@/app/chatgpt-auth";
-import { CATEGORIES, classifyCapture } from "@/lib/classifier";
+import { classifyCapture, isPrimaryType } from "@/lib/classifier";
+import { primaryPreferenceSignal, repeatTopicDecision, type ClassificationCorrection, type PrimaryType } from "@/lib/classifier-core";
 import { adoptLegacyData, database, loadState } from "@/lib/data";
 
 export const dynamic = "force-dynamic";
@@ -8,6 +9,10 @@ export const dynamic = "force-dynamic";
 const id = (prefix: string) => `${prefix}-${crypto.randomUUID()}`;
 const clean = (value: unknown, max = 1000) => String(value ?? "").trim().slice(0, max);
 const safeDate = (value: unknown) => /^\d{4}-\d{2}-\d{2}$/u.test(String(value)) ? String(value) : new Date().toISOString().slice(0, 10);
+const storedType = (value: unknown): PrimaryType | null => {
+  if (value === "Knowledge Candidate") return "Knowledge";
+  return isPrimaryType(value) ? value : null;
+};
 
 function addDays(date: string, amount: number) {
   const value = new Date(`${date}T12:00:00.000Z`);
@@ -58,28 +63,46 @@ export async function POST(request: NextRequest) {
       if (action === "capture") {
         const body = clean(payload.body, 1500);
         if (!body) return NextResponse.json({ error: "先写下一句话吧。" }, { status: 400 });
-        const result = await classifyCapture(body);
+        const correctionResult = await db.prepare("SELECT from_type,to_type,signal_key,topic FROM classification_corrections WHERE user_id = ? ORDER BY created_at DESC LIMIT 200")
+          .bind(user.userId).all<Record<string, unknown>>();
+        const corrections: ClassificationCorrection[] = (correctionResult.results ?? []).flatMap((row) => {
+          const toType = storedType(row.to_type);
+          if (!toType) return [];
+          return [{
+            from_type: storedType(row.from_type),
+            to_type: toType,
+            signal_key: row.signal_key ? String(row.signal_key) : null,
+            topic: row.topic ? String(row.topic) : null,
+          }];
+        });
+        const result = await classifyCapture(body, corrections);
         let priorCount = 0;
+        let priorTypes: Array<PrimaryType | null> = [];
         if (result.topic) {
           const row = await db.prepare("SELECT COUNT(*) AS count FROM captures WHERE user_id = ? AND topic = ?").bind(user.userId, result.topic).first<{ count: number }>();
           priorCount = Number(row?.count ?? 0);
+          const priorResult = await db.prepare("SELECT category FROM captures WHERE user_id = ? AND topic = ? ORDER BY created_at DESC LIMIT 2")
+            .bind(user.userId, result.topic).all<{ category: string }>();
+          priorTypes = (priorResult.results ?? []).map((item) => storedType(item.category));
         }
+        const repeatDecision = repeatTopicDecision(priorCount, priorTypes, result.primary_type);
         const captureId = id("capture");
-        await db.prepare("INSERT INTO captures (id,user_id,body,category,topic,confidence,created_at) VALUES (?,?,?,?,?,?,?)")
-          .bind(captureId, user.userId, body, result.category, result.topic, result.confidence, now).run();
-        if (result.category === "Task") {
+        await db.prepare("INSERT INTO captures (id,user_id,body,category,secondary_type,topic,confidence,reason,created_at) VALUES (?,?,?,?,?,?,?,?,?)")
+          .bind(captureId, user.userId, body, result.primary_type ?? "", result.secondary_type ?? null, result.topic, result.confidence, result.reason, now).run();
+        if (result.primary_type === "Task") {
           await db.prepare("INSERT INTO tasks (id,user_id,title,notes,tier,status,due_date,carry_count,progress_text,project_id,created_at,completed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
             .bind(id("task"), user.userId, body, `由记录 ${captureId} 创建`, "suggested", "open", dueDateFrom(body, localDate), 0, "", null, now, null).run();
         }
         const firstCapture = !Boolean(account.first_capture_completed);
         if (firstCapture) await db.prepare("UPDATE profiles SET first_capture_completed = 1,updated_at = ? WHERE user_id = ?").bind(now, user.userId).run();
-        meta = { captureId, classification: result, repeated: Boolean(result.topic && priorCount >= 2), mentionCount: priorCount + 1, firstCapture };
+        meta = { captureId, classification: result, repeated: Boolean(result.topic && repeatDecision.shouldNotify), repeatSuggestion: repeatDecision.suggestion, mentionCount: priorCount + 1, firstCapture };
       } else if (action === "updateCaptureCategory") {
         const captureId = clean(payload.id, 100);
         const category = clean(payload.category, 40);
-        if (!CATEGORIES.includes(category as never) && category !== "Knowledge") return NextResponse.json({ error: "这个分类暂不支持。" }, { status: 400 });
-        const capture = await db.prepare("SELECT id,body,category,created_at FROM captures WHERE id = ? AND user_id = ? LIMIT 1").bind(captureId, user.userId).first<Record<string, unknown>>();
+        if (!isPrimaryType(category)) return NextResponse.json({ error: "这个分类暂不支持。" }, { status: 400 });
+        const capture = await db.prepare("SELECT id,body,category,topic,created_at FROM captures WHERE id = ? AND user_id = ? LIMIT 1").bind(captureId, user.userId).first<Record<string, unknown>>();
         if (!capture) return NextResponse.json({ error: "没有找到这条记录。" }, { status: 404 });
+        const previousType = storedType(capture.category);
         const taskNote = `由记录 ${captureId} 创建`;
         const generatedTask = await db.prepare("SELECT id,status FROM tasks WHERE user_id = ? AND (notes = ? OR (title = ? AND created_at = ? AND notes = '由快速记录自动识别')) LIMIT 1")
           .bind(user.userId, taskNote, String(capture.body), String(capture.created_at)).first<{ id: string; status: string }>();
@@ -89,7 +112,12 @@ export async function POST(request: NextRequest) {
         } else if (category !== "Task" && generatedTask?.status === "open") {
           await db.prepare("DELETE FROM tasks WHERE id = ? AND user_id = ?").bind(generatedTask.id, user.userId).run();
         }
-        await db.prepare("UPDATE captures SET category = ?,confidence = 100 WHERE id = ? AND user_id = ?").bind(category, captureId, user.userId).run();
+        if (previousType !== category) {
+          await db.prepare("INSERT INTO classification_corrections (id,user_id,capture_id,body,from_type,to_type,signal_key,topic,created_at) VALUES (?,?,?,?,?,?,?,?,?)")
+            .bind(id("correction"), user.userId, captureId, String(capture.body), previousType, category, primaryPreferenceSignal(String(capture.body)), capture.topic ? String(capture.topic) : null, now).run();
+        }
+        await db.prepare("UPDATE captures SET category = ?,secondary_type = NULL,confidence = 1,reason = ? WHERE id = ? AND user_id = ?")
+          .bind(category, `你手动选择了 ${category}，已记入账号偏好`, captureId, user.userId).run();
       } else if (action === "updateTask") {
         const taskId = clean(payload.id, 100);
         const status = payload.status === "done" ? "done" : "open";
@@ -148,7 +176,7 @@ export async function POST(request: NextRequest) {
         await db.prepare("INSERT INTO reviews (id,user_id,period_kind,period_label,reflection,created_at) VALUES (?,?,?,?,?,?) ON CONFLICT(user_id,period_kind,period_label) DO UPDATE SET reflection = excluded.reflection,created_at = excluded.created_at")
           .bind(id("review"), user.userId, periodKind, periodLabel, reflection, now).run();
       } else if (action === "saveKnowledge") {
-        await db.prepare("UPDATE captures SET category = 'Knowledge',confidence = 100 WHERE id = ? AND user_id = ?").bind(clean(payload.id, 100), user.userId).run();
+        await db.prepare("UPDATE captures SET category = 'Knowledge',secondary_type = NULL,confidence = 1,reason = '你已确认这是一条 Knowledge' WHERE id = ? AND user_id = ?").bind(clean(payload.id, 100), user.userId).run();
       } else {
         return NextResponse.json({ error: "未知操作。" }, { status: 400 });
       }
