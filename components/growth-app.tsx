@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { BookOpen, CalendarDays, Check, ChevronRight, Clock3, FolderKanban, LogOut, Menu, MoreHorizontal, Plus, Sparkles, Target } from "lucide-react";
+import { BookOpen, CalendarDays, Check, ChevronRight, Clock3, FolderKanban, Menu, MoreHorizontal, Plus, Sparkles, Target } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -12,11 +12,10 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { Toaster } from "@/components/ui/sonner";
 import type { AppState, Capture, Project, Task } from "@/lib/data";
+import { applyLocalAction, loadLocalState, saveLocalState, type LocalAction } from "@/lib/local-store";
 
 type View = "today" | "capture" | "projects" | "review";
-type QueuedAction = { action: string; payload: Record<string, unknown> };
 type RepeatNotice = { topic: string; count: number; captureId?: string; suggestion: "Explore" | "Project" };
-type Account = { userId: string; email: string };
 
 const emptyState: AppState = { profile: null, projects: [], tasks: [], captures: [], progressEvents: [], skills: [], reviews: [], localDate: "", syncedAt: "" };
 const nav = [
@@ -73,14 +72,7 @@ function inPeriod(value: string | null, kind: string, now: Date) {
   return date >= start && date < end;
 }
 
-async function postAction(item: QueuedAction) {
-  const response = await fetch("/api/actions", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(item) });
-  const data = await response.json() as { state?: AppState; meta?: Record<string, unknown>; error?: string };
-  if (!response.ok) throw new Error(data.error || "保存失败");
-  return data;
-}
-
-export function GrowthApp({ account, signOutPath }: { account: Account; signOutPath: string }) {
+export function GrowthApp() {
   const [view, setView] = useState<View>("today");
   const [state, setState] = useState<AppState>(emptyState);
   const [ready, setReady] = useState(false);
@@ -88,7 +80,6 @@ export function GrowthApp({ account, signOutPath }: { account: Account; signOutP
   const [localDate, setLocalDate] = useState("");
   const [captureText, setCaptureText] = useState("");
   const [syncing, setSyncing] = useState(true);
-  const [offline, setOffline] = useState(false);
   const [repeatNotice, setRepeatNotice] = useState<RepeatNotice | null>(null);
   const [selectedProjectId, setSelectedProjectId] = useState("");
   const [taskSheet, setTaskSheet] = useState<Task | null>(null);
@@ -99,69 +90,45 @@ export function GrowthApp({ account, signOutPath }: { account: Account; signOutP
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [newProject, setNewProject] = useState({ title: "", why: "", nextStep: "" });
   const [welcomeName, setWelcomeName] = useState<string | null>(null);
-  const queueKey = `forward-queue-${account.userId}`;
 
-  const refresh = useCallback(async (dateKey: string) => {
+  const runAction = useCallback(async (item: LocalAction) => {
+    const prepared = { ...item, payload: { ...item.payload, localDate: localDate || localDateKey() } };
     setSyncing(true);
     try {
-      const response = await fetch(`/api/state?date=${encodeURIComponent(dateKey)}`, { cache: "no-store" });
-      if (!response.ok) throw new Error("读取失败");
-      const next = await response.json() as AppState;
-      setState(next);
-      setSelectedProjectId((current) => current || next.projects[0]?.id || "");
-      setOffline(false);
-    } catch { setOffline(true); }
-    finally { setSyncing(false); setReady(true); }
-  }, []);
-
-  const queueOffline = useCallback((item: QueuedAction) => {
-    const queue = JSON.parse(localStorage.getItem(queueKey) || "[]") as QueuedAction[];
-    queue.push(item); localStorage.setItem(queueKey, JSON.stringify(queue)); setOffline(true);
-  }, [queueKey]);
-
-  const runAction = useCallback(async (item: QueuedAction, optimistic?: () => void) => {
-    const prepared = { ...item, payload: { ...item.payload, localDate: localDate || localDateKey() } };
-    optimistic?.(); setSyncing(true);
-    try {
-      const data = await postAction(prepared);
-      if (data.state) setState(data.state);
-      setOffline(false);
-      return data.meta ?? {};
+      const data = applyLocalAction(state, prepared);
+      saveLocalState(data.state);
+      setState(data.state);
+      return data.meta;
     } catch (error) {
-      queueOffline(prepared);
-      toast.warning(error instanceof Error ? error.message : "已保存在离线队列");
+      toast.error(error instanceof Error ? error.message : "保存失败");
       return {};
     } finally { setSyncing(false); }
-  }, [localDate, queueOffline]);
+  }, [localDate, state]);
 
   useEffect(() => {
     const initial = new Date(); const initialKey = localDateKey(initial);
-    setClock(initial); setLocalDate(initialKey); void refresh(initialKey);
+    const next = loadLocalState(initialKey);
+    saveLocalState(next);
+    setClock(initial); setLocalDate(initialKey); setState(next);
+    setSelectedProjectId(next.projects[0]?.id || "");
+    setSyncing(false); setReady(true);
     if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => undefined);
-
-    const flush = async () => {
-      const queue = JSON.parse(localStorage.getItem(queueKey) || "[]") as QueuedAction[];
-      if (!queue.length) return;
-      for (const item of queue) { try { const data = await postAction(item); if (data.state) setState(data.state); } catch { return; } }
-      localStorage.removeItem(queueKey); setOffline(false); toast.success("离线记录已同步");
-    };
     const checkDate = () => {
       const next = new Date(); const nextKey = localDateKey(next); setClock(next);
-      setLocalDate((current) => { if (current && current !== nextKey) void refresh(nextKey); return nextKey; });
+      setLocalDate((current) => {
+        if (current && current !== nextKey) {
+          const refreshed = loadLocalState(nextKey);
+          saveLocalState(refreshed);
+          setState(refreshed);
+        }
+        return nextKey;
+      });
     };
-    const onVisibility = () => { if (document.visibilityState === "visible") { checkDate(); void flush(); } };
+    const onVisibility = () => { if (document.visibilityState === "visible") checkDate(); };
     const timer = window.setInterval(checkDate, 60_000);
-    window.addEventListener("online", flush); document.addEventListener("visibilitychange", onVisibility); void flush();
-    return () => { window.clearInterval(timer); window.removeEventListener("online", flush); document.removeEventListener("visibilitychange", onVisibility); };
-  }, [queueKey, refresh]);
-
-  useEffect(() => {
-    const context = (document as Document & { modelContext?: { registerTool: (tool: unknown, options?: { signal?: AbortSignal }) => void | Promise<void> } }).modelContext;
-    if (!context?.registerTool || !state.profile) return;
-    const lifecycle = new AbortController();
-    void Promise.resolve(context.registerTool({ name: "capture_thought", title: "记录一条想法", description: "把一句新的任务、想法、探索、时刻或知识记录到向前。", inputSchema: { type: "object", properties: { body: { type: "string" } }, required: ["body"], additionalProperties: false }, annotations: { readOnlyHint: false, untrustedContentHint: false }, execute: async (input: unknown) => { const body = String((input as { body?: unknown }).body ?? "").trim(); if (!body) throw new Error("body is required"); const data = await postAction({ action: "capture", payload: { body, localDate: localDate || localDateKey() } }); if (data.state) setState(data.state); return { saved: true, classification: data.meta?.classification }; } }, { signal: lifecycle.signal })).catch(() => undefined);
-    return () => lifecycle.abort();
-  }, [localDate, state.profile]);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", onVisibility); };
+  }, []);
 
   const todayTasks = state.tasks.filter((task) => task.dueDate === localDate);
   const todayCaptures = state.captures.filter((item) => sameLocalDay(item.createdAt, localDate));
@@ -172,8 +139,7 @@ export function GrowthApp({ account, signOutPath }: { account: Account; signOutP
 
   const submitCapture = async () => {
     const body = captureText.trim(); if (!body) return; setCaptureText("");
-    const optimistic: Capture = { id: `local-${Date.now()}`, body, category: "", secondaryType: null, topic: null, confidence: 0, reason: "正在判断主意图", createdAt: new Date().toISOString() };
-    const meta = await runAction({ action: "capture", payload: { body } }, () => setState((current) => ({ ...current, captures: [optimistic, ...current.captures] })));
+    const meta = await runAction({ action: "capture", payload: { body } });
     const classification = meta.classification as { primary_type?: string | null; secondary_type?: string; topic?: string; confidence?: number; reason?: string } | undefined;
     if (meta.repeated && classification?.topic) setRepeatNotice({ topic: classification.topic, count: Number(meta.mentionCount ?? 3), captureId: String(meta.captureId ?? ""), suggestion: meta.repeatSuggestion === "Project" ? "Project" : "Explore" });
     if (meta.firstCapture) toast.success("以后你只需要写，整理交给我。");
@@ -181,11 +147,11 @@ export function GrowthApp({ account, signOutPath }: { account: Account; signOutP
     else if (Number(classification.confidence ?? 0) < 0.8) toast.info(`已识别为 ${categoryName(classification.primary_type)}，可修改`);
     else toast.success(`已记录 · ${categoryName(classification.primary_type)}`);
   };
-  const toggleTask = (task: Task, checked: boolean) => runAction({ action: "updateTask", payload: { id: task.id, status: checked ? "done" : "open", progressText: task.progressText } }, () => setState((current) => ({ ...current, tasks: current.tasks.map((item) => item.id === task.id ? { ...item, status: checked ? "done" : "open" } : item) })));
+  const toggleTask = (task: Task, checked: boolean) => runAction({ action: "updateTask", payload: { id: task.id, status: checked ? "done" : "open", progressText: task.progressText } });
   const openTask = (task: Task) => { setTaskSheet(task); setTaskProgress(task.progressText); };
   const saveTaskProgress = async () => { if (!taskSheet) return; await runAction({ action: "updateTask", payload: { id: taskSheet.id, status: taskSheet.status, progressText: taskProgress } }); setTaskSheet(null); toast.success("进度已更新"); };
   const updateCategory = async (capture: Capture, category: string) => {
-    await runAction({ action: "updateCaptureCategory", payload: { id: capture.id, category } }, () => setState((current) => ({ ...current, captures: current.captures.map((item) => item.id === capture.id ? { ...item, category, confidence: 100 } : item) })));
+    await runAction({ action: "updateCaptureCategory", payload: { id: capture.id, category } });
     toast.success(`已设为 ${categoryName(category)}`);
   };
   const classifyRepeatedTopic = async (category: "Idea" | "Explore") => {
@@ -203,27 +169,22 @@ export function GrowthApp({ account, signOutPath }: { account: Account; signOutP
   };
   const startProjectFromTopic = (topic: string) => { setNewProject({ title: `完成「${topic}」的第一个成果`, why: `这是我反复提到的主题：${topic}`, nextStep: "写下第一个最小行动" }); setNewProjectOpen(true); };
   const register = async (nickname: string) => {
-    setSyncing(true);
-    try {
-      const data = await postAction({ action: "registerProfile", payload: { nickname, localDate: localDate || localDateKey() } });
-      if (data.state) setState(data.state);
-      setWelcomeName(nickname); window.setTimeout(() => setWelcomeName(null), 1350);
-    } catch (error) { toast.error(error instanceof Error ? error.message : "注册失败"); }
-    finally { setSyncing(false); }
+    await runAction({ action: "registerProfile", payload: { nickname } });
+    setWelcomeName(nickname); window.setTimeout(() => setWelcomeName(null), 1350);
   };
 
   if (!ready) return <div className="app-loading"><div className="brand-mark">向</div><p>正在打开你的空间…</p></div>;
-  if (!state.profile) return <><Onboarding email={account.email} busy={syncing} onSubmit={register}/><Toaster position="top-center" richColors/></>;
+  if (!state.profile) return <><Onboarding busy={syncing} onSubmit={register}/><Toaster position="top-center" richColors/></>;
 
   return <SidebarProvider style={{ "--sidebar-width": "15.5rem" } as React.CSSProperties}>
     {welcomeName && <WelcomeOverlay nickname={welcomeName}/>}
     <Sidebar collapsible="offcanvas" className="growth-sidebar">
       <SidebarHeader className="brand-wrap"><div className="brand-mark">向</div><div><strong>向前</strong><span>把成长留在日常里</span></div></SidebarHeader>
       <SidebarContent><SidebarGroup><SidebarGroupContent><SidebarMenu>{nav.map((item) => <SidebarMenuItem key={item.id}><SidebarMenuButton asChild isActive={view === item.id} className="growth-nav"><button onClick={() => setView(item.id)}><item.icon/><span>{item.label}</span></button></SidebarMenuButton></SidebarMenuItem>)}</SidebarMenu></SidebarGroupContent></SidebarGroup></SidebarContent>
-      <SidebarFooter className="account-foot"><div className="account-copy"><strong>{state.profile.nickname}</strong><span>{account.email}</span></div><a href={signOutPath} target="_top" aria-label="退出登录"><LogOut/></a><div className="sync-status"><div className={`sync-dot ${offline ? "offline" : ""}`}/><span>{offline ? "离线 · 稍后自动同步" : syncing ? "正在同步" : "所有设备已同步"}</span></div></SidebarFooter>
+      <SidebarFooter className="account-foot"><div className="account-copy"><strong>{state.profile.nickname}</strong><span>个人成长空间</span></div><div className="sync-status"><div className="sync-dot"/><span>{syncing ? "正在保存" : "已自动保存在本机"}</span></div></SidebarFooter>
     </Sidebar>
     <SidebarInset className="growth-shell">
-      <header className="mobile-header"><SidebarTrigger><Menu/></SidebarTrigger><span>向前</span><div className={`sync-dot ${offline ? "offline" : ""}`}/></header>
+      <header className="mobile-header"><SidebarTrigger><Menu/></SidebarTrigger><span>向前</span><div className="sync-dot"/></header>
       <main className="workspace">
         {view === "today" && <TodayView state={state} clock={clock} localDate={localDate} tasks={todayTasks} captures={todayCaptures} completed={completed} captureText={captureText} setCaptureText={setCaptureText} submitCapture={submitCapture} toggleTask={toggleTask} openTask={openTask} setView={setView} repeatNotice={repeatNotice} dismissRepeat={() => setRepeatNotice(null)} classifyRepeatedTopic={classifyRepeatedTopic} createProject={startProjectFromTopic}/>}
         {view === "capture" && <CaptureView state={state} captureText={captureText} setCaptureText={setCaptureText} submitCapture={submitCapture} updateCategory={updateCategory}/>}
@@ -239,9 +200,9 @@ export function GrowthApp({ account, signOutPath }: { account: Account; signOutP
   </SidebarProvider>;
 }
 
-function Onboarding({ email, busy, onSubmit }: { email: string; busy: boolean; onSubmit: (nickname: string) => void }) {
+function Onboarding({ busy, onSubmit }: { busy: boolean; onSubmit: (nickname: string) => void }) {
   const [nickname, setNickname] = useState("");
-  return <main className="onboarding"><section className="auth-card"><div className="brand-mark">向</div><span className="eyebrow">WELCOME TO 向前</span><h1>先认识一下你。</h1><p>你的邮箱负责登录与多端同步，昵称只用来让这里更像属于你的空间。</p><label>登录邮箱</label><input value={email} readOnly aria-label="登录邮箱"/><label>希望怎么称呼你</label><input value={nickname} onChange={(event) => setNickname(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && nickname.trim()) onSubmit(nickname.trim()); }} autoFocus placeholder="你的昵称" maxLength={30}/><Button disabled={busy || !nickname.trim()} onClick={() => onSubmit(nickname.trim())}>{busy ? "正在创建…" : "进入我的空间"}</Button><small>不同账号的数据会完全分开保存。</small></section></main>;
+  return <main className="onboarding"><section className="auth-card"><div className="brand-mark">向</div><span className="eyebrow">WELCOME TO 向前</span><h1>先认识一下你。</h1><p>设置一个昵称，开始记录任务、想法、项目和成长轨迹。</p><label>希望怎么称呼你</label><input value={nickname} onChange={(event) => setNickname(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && nickname.trim()) onSubmit(nickname.trim()); }} autoFocus placeholder="你的昵称" maxLength={30}/><Button disabled={busy || !nickname.trim()} onClick={() => onSubmit(nickname.trim())}>{busy ? "正在创建…" : "进入我的空间"}</Button><small>数据仅保存在当前浏览器，不会上传到服务器。</small></section></main>;
 }
 function WelcomeOverlay({ nickname }: { nickname: string }) { return <div className="welcome-overlay"><div><span className="welcome-wave">👋</span><h1>你好，{nickname}</h1><p>从今天开始，把属于你的成长留在这里。</p></div></div>; }
 
